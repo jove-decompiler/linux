@@ -1173,6 +1173,7 @@ SKELETONS += $(SKEL_OUT)/kwork_trace.skel.h $(SKEL_OUT)/sample_filter.skel.h
 SKELETONS += $(SKEL_OUT)/kwork_top.skel.h
 SKELETONS += $(SKEL_OUT)/bench_uprobe.skel.h
 SKELETONS += $(SKEL_OUT)/augmented_raw_syscalls.skel.h
+SKELETONS += $(SKEL_OUT)/jove_augmented_raw_syscalls.skel.h
 
 $(SKEL_TMP_OUT) $(LIBAPI_OUTPUT) $(LIBBPF_OUTPUT) $(LIBPERF_OUTPUT) $(LIBSUBCMD_OUTPUT) $(LIBSYMBOL_OUTPUT):
 	$(Q)$(MKDIR) -p $@
@@ -1243,6 +1244,10 @@ ifeq ($(VMLINUX_H),)
 else
 	$(Q)cp "$(VMLINUX_H)" $@
 endif
+
+$(SKEL_TMP_OUT)/jove_augmented_raw_syscalls.bpf.o: CLANG_OPTIONS += -std=gnu18
+$(SKEL_TMP_OUT)/jove_augmented_raw_syscalls.bpf.o: BPF_INCLUDE += -I$(srctree)/../boost/libs/preprocessor/include
+$(SKEL_TMP_OUT)/jove_augmented_raw_syscalls.bpf.o: BPF_INCLUDE += -I$(srctree)/../lib
 
 $(SKEL_TMP_OUT)/%.bpf.o: util/bpf_skel/%.bpf.c $(LIBBPF) $(SKEL_OUT)/vmlinux.h | $(SKEL_TMP_OUT)
 	$(QUIET_CLANG)$(CLANG) -g -O2 --target=bpf $(CLANG_OPTIONS) $(BPF_INCLUDE) $(TOOLS_UAPI_INCLUDE) \

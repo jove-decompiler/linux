@@ -8,6 +8,15 @@
  */
 #include "builtin.h"
 
+#ifdef HAVE_LIBBPF_SUPPORT
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include <bpf/btf.h>
+#ifdef HAVE_BPF_SKEL
+#include "bpf_skel/jove_augmented_raw_syscalls.skel.h"
+#endif
+#endif
+
 #include "util/build-id.h"
 #include <subcmd/parse-options.h>
 #include <internal/xyarray.h>
@@ -159,6 +168,20 @@ struct record {
 	struct evlist	*evlist;
 	struct perf_session	*session;
 	struct evlist		*sb_evlist;
+	struct {
+		struct syscall  *table;
+		struct {
+			struct evsel *sys_enter,
+				*sys_exit,
+				*bpf_output;
+		}		events;
+	} syscalls;
+#ifdef HAVE_BPF_SKEL
+	struct jove_augmented_raw_syscalls_bpf *skel;
+#endif
+#ifdef HAVE_LIBBPF_SUPPORT
+	struct btf		*btf;
+#endif
 	pthread_t		thread_id;
 	int			realtime_prio;
 	bool			switch_output_event_set;
@@ -189,6 +212,8 @@ static volatile int done;
 static volatile int auxtrace_record__snapshot_started;
 static DEFINE_TRIGGER(auxtrace_snapshot_trigger);
 static DEFINE_TRIGGER(switch_output_trigger);
+
+static bool jove_syscalls;
 
 static const char *affinity_tags[PERF_AFFINITY_MAX] = {
 	"SYS", "NODE", "CPU"
@@ -2464,6 +2489,23 @@ static int __cmd_record(struct record *rec, int argc, const char **argv)
 			status = err;
 			goto out_delete_session;
 		}
+
+		if (jove_syscalls)
+		{
+			struct stat st;
+			if (stat("/proc/self/ns/pid", &st) < 0) {
+				int err = errno;
+				fprintf(stderr, "stat(/proc/self/ns/pid) failed: %s\n", strerror(err));
+			}
+
+			rec->skel->bss->dev = st.st_dev;
+			rec->skel->bss->ino = st.st_ino;
+
+		//rec->skel->bss->the_pid = rec->evlist->workload.pid;
+		bool value = true;
+		err = bpf_map_update_elem(bpf_map__fd(rec->skel->maps.pids_unfiltered),
+                                          &rec->evlist->workload.pid, &value, BPF_ANY);
+		}
 	}
 
 	/*
@@ -2490,6 +2532,22 @@ static int __cmd_record(struct record *rec, int argc, const char **argv)
 		err = -1;
 		goto out_free_threads;
 	}
+
+#ifdef HAVE_BPF_SKEL
+	if (rec->syscalls.events.bpf_output) {
+		struct perf_cpu cpu;
+		int i;
+		perf_cpu_map__for_each_cpu(cpu, i, rec->syscalls.events.bpf_output->core.cpus) {
+                  fprintf(stderr, "rec->syscalls.events.bpf_output->core.fd=%d\n", *((const int *)xyarray__entry(rec->syscalls.events.bpf_output->core.fd,
+					       cpu.cpu, 0)));
+			bpf_map__update_elem(rec->skel->maps.__jove_augmented_syscalls__,
+				&cpu.cpu, sizeof(int),
+				xyarray__entry(rec->syscalls.events.bpf_output->core.fd,
+					       cpu.cpu, 0),
+				sizeof(__u32), BPF_ANY);
+		}
+	}
+#endif
 	/* Debug message used by test scripts */
 	pr_debug3("perf record done opening and mmapping events\n");
 	session->header.env.comp_mmap_len = session->evlist->core.mmap_len;
@@ -3564,6 +3622,8 @@ static struct option __record_options[] = {
 	OPT_BOOLEAN(0, "off-cpu", &record.off_cpu, "Enable off-cpu analysis"),
 	OPT_STRING(0, "setup-filter", &record.filter_action, "pin|unpin",
 		   "BPF filter action"),
+	OPT_BOOLEAN(0, "jove_syscalls", &jove_syscalls,
+		    "Augmented raw syscalls (jove)"),
 	OPT_END()
 };
 
@@ -3970,6 +4030,18 @@ static int record__init_thread_masks(struct record *rec)
 	return ret;
 }
 
+#ifdef HAVE_BPF_SKEL
+static int bpf__setup_bpf_output(struct evlist *evlist)
+{
+	int err = parse_event(evlist, "bpf-output/no-inherit=1,name=__jove_augmented_syscalls__/");
+
+	if (err)
+		pr_debug("ERROR: failed to create the \"__augmented_syscalls__\" bpf-output event\n");
+
+	return err;
+}
+#endif
+
 int cmd_record(int argc, const char **argv)
 {
 	int err;
@@ -4016,6 +4088,39 @@ int cmd_record(int argc, const char **argv)
 			"cgroup monitoring only available in system-wide mode");
 
 	}
+
+#ifdef HAVE_BPF_SKEL
+	if (!jove_syscalls)
+		goto skip_augmentation;
+
+	record.skel = jove_augmented_raw_syscalls_bpf__open();
+	if (!record.skel) {
+		pr_err("Failed to open augmented syscalls BPF skeleton");
+			err = -EINVAL;
+			goto out_opts;
+	} else {
+		err = jove_augmented_raw_syscalls_bpf__load(record.skel);
+
+		if (err < 0) {
+			libbpf_strerror(err, errbuf, sizeof(errbuf));
+			pr_debug("Failed to load jove augmented syscalls BPF skeleton: %s\n", errbuf);
+			err = -EINVAL;
+			goto out_opts;
+		} else {
+			jove_augmented_raw_syscalls_bpf__attach(record.skel);
+
+			err = bpf__setup_bpf_output(record.evlist);
+			if (err) {
+				libbpf_strerror(err, errbuf, sizeof(errbuf));
+				pr_err("ERROR: Setup BPF output event failed: %s\n", errbuf);
+				goto out_opts;
+			}
+			record.syscalls.events.bpf_output = evlist__last(record.evlist);
+			assert(evsel__name_is(record.syscalls.events.bpf_output, "__jove_augmented_syscalls__"));
+		}
+	}
+skip_augmentation:
+#endif
 
 	if (rec->buildid_mmap) {
 		if (!perf_can_record_build_id()) {
@@ -4239,6 +4344,9 @@ int cmd_record(int argc, const char **argv)
 		pr_err("record__config_tracking_events failed, error %d\n", err);
 		goto out;
 	}
+
+	if (jove_syscalls)
+		rec->opts.target.system_wide = true;
 
 	err = record__init_thread_masks(rec);
 	if (err) {
