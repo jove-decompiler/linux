@@ -103,7 +103,9 @@ void syscall_exit_work(struct pt_regs *regs, unsigned long work)
 
 	audit_syscall_exit(regs);
 
+#if 0
 	if (work & SYSCALL_WORK_SYSCALL_TRACEPOINT)
+#endif
 		trace_sys_exit(regs, syscall_get_return_value(current, regs));
 
 	step = report_single_step(work);

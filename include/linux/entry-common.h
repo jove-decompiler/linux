@@ -169,7 +169,9 @@ static __always_inline void syscall_exit_to_user_mode_work(struct pt_regs *regs)
 	 * enabled, we want to run them exactly once per syscall exit with
 	 * interrupts enabled.
 	 */
+#if 0
 	if (unlikely(work & SYSCALL_WORK_EXIT))
+#endif
 		syscall_exit_work(regs, work);
 	local_irq_disable_exit_to_user();
 	exit_to_user_mode_prepare(regs);
